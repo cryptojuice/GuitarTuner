@@ -3,11 +3,14 @@
     <fonts>
     </fonts>
     <colors>
-        <color name="Background" rgba="#1a1a2eff"/>
+        <color name="Background" rgba="#0f0f1aff"/>
         <color name="TextLight" rgba="#ffffffcc"/>
         <color name="TextDim" rgba="#8888aaff"/>
         <color name="GreenAccent" rgba="#00ff88ff"/>
         <color name="PanelBg" rgba="#16213eff"/>
+        <color name="AccentGreen" rgba="#00e87bff"/>
+        <color name="AccentAmber" rgba="#ffb830ff"/>
+        <color name="AccentRed" rgba="#ff4466ff"/>
     </colors>
     <template
         class="CViewContainer"
@@ -31,45 +34,12 @@
             transparent="true"
         />
 
-        <!-- Reference label -->
-        <view
-            class="CTextLabel"
-            origin="20, 370"
-            size="60, 24"
-            font="~ NormalFont"
-            font-color="TextDim"
-            back-color="~ TransparentCColor"
-            frame-color="~ TransparentCColor"
-            text-alignment="right"
-            text-inset="5, 0"
-            title="A4 ="
-            transparent="true"
-            mouse-enabled="false"
-        />
-
-        <!-- Reference frequency knob -->
-        <view
-            class="CKnob"
-            control-tag="Reference"
-            origin="85, 365"
-            size="32, 32"
-            angle-start="135"
-            angle-range="270"
-            default-value="0.615384615"
-            min-value="0"
-            max-value="1"
-            mouse-enabled="true"
-            corona-color="GreenAccent"
-            handle-line-width="1"
-            handle-color="TextLight"
-        />
-
         <!-- Reference value display -->
         <view
             class="CTextEdit"
             control-tag="Reference"
-            origin="125, 370"
-            size="55, 24"
+            origin="330, 370"
+            size="45, 24"
             font="~ NormalFontSmall"
             font-color="TextLight"
             back-color="PanelBg"
@@ -88,8 +58,8 @@
         <!-- Hz label for reference -->
         <view
             class="CTextLabel"
-            origin="185, 370"
-            size="30, 24"
+            origin="375, 370"
+            size="22, 24"
             font="~ NormalFontSmall"
             font-color="TextDim"
             back-color="~ TransparentCColor"

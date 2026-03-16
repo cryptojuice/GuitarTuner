@@ -7,6 +7,7 @@
 #include <cstdio>
 #include <cstring>
 #include <cmath>
+#include <algorithm>
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
@@ -65,49 +66,183 @@ bool TunerView::removed (VSTGUI::CView* parent)
 
 void TunerView::updateSmoothing ()
 {
-    smoothedCents_ += kSmoothingAlpha * (targetCents_ - smoothedCents_);
+    // Adaptive smoothing: fast for large jumps, slow for fine-tuning
+    float delta = targetCents_ - smoothedCents_;
+    float alpha = (std::abs (delta) > 15.0f) ? kSmoothingAlphaFast : kSmoothingAlphaSlow;
+    smoothedCents_ += alpha * delta;
 
-    // Glow intensity: target 1.0 when in tune (|cents| < 5), else 0.0
-    float glowTarget = (confidence_ > 0.1f && targetFrequency_ > 0.0f && std::abs (smoothedCents_) < 5.0f) ? 1.0f : 0.0f;
-    glowIntensity_ += kSmoothingAlpha * (glowTarget - glowIntensity_);
+    // Record into trail ring buffer
+    trailCents_[trailIndex_] = smoothedCents_;
+    trailIndex_ = (trailIndex_ + 1) % kTrailLength;
+    if (trailCount_ < kTrailLength)
+        trailCount_++;
+
+    // Bloom intensity: target 1.0 when in tune (|cents| < kInTuneThreshold), else 0.0
+    float bloomTarget = (confidence_ > 0.1f && targetFrequency_ > 0.0f && std::abs (smoothedCents_) < kInTuneThreshold) ? 1.0f : 0.0f;
+    bloomIntensity_ += 0.2f * (bloomTarget - bloomIntensity_);
 }
 
 void TunerView::draw (VSTGUI::CDrawContext* ctx)
 {
     VSTGUI::CRect r = getViewSize ();
-    drawBackground (ctx, r);
-    drawInTuneGlow (ctx, r);
+    drawBackgroundGradient (ctx, r);
+    drawArcTrack (ctx, r);
+    drawArcHighlight (ctx, r);
     drawCentMarkers (ctx, r);
-    drawTuningArc (ctx, r);
+    drawNeedleTrail (ctx, r);
+    drawNeedleGlow (ctx, r);
     drawNeedle (ctx, r);
+    drawNoteBloom (ctx, r);
     drawNoteDisplay (ctx, r);
     drawInfoText (ctx, r);
     setDirty (false);
 }
 
-void TunerView::drawBackground (VSTGUI::CDrawContext* ctx, const VSTGUI::CRect& r)
+void TunerView::drawBackgroundGradient (VSTGUI::CDrawContext* ctx, const VSTGUI::CRect& r)
 {
-    ctx->setFillColor (VSTGUI::CColor (0x1a, 0x1a, 0x2e, 0xff));
+    // Solid deep navy fill
+    ctx->setFillColor (VSTGUI::CColor (0x0f, 0x0f, 0x1a, 0xff));
     ctx->drawRect (r, VSTGUI::kDrawFilled);
+
+    // Radial gradient spotlight centered at pivot
+    float cx = static_cast<float> (r.left + r.getWidth () / 2);
+    float cy = static_cast<float> (r.top + r.getHeight () * kPivotY);
+    float spotRadius = static_cast<float> (std::min (r.getWidth (), r.getHeight ()) * 0.5);
+
+    auto* path = ctx->createGraphicsPath ();
+    if (path)
+    {
+        path->addRect (VSTGUI::CRect (r));
+        auto gradient = VSTGUI::owned (VSTGUI::CGradient::create (0.0, 1.0,
+            VSTGUI::CColor (0x1a, 0x1a, 0x30, 0xff),
+            VSTGUI::CColor (0x0f, 0x0f, 0x1a, 0xff)));
+        ctx->fillRadialGradient (path, *gradient,
+            VSTGUI::CPoint (cx, cy), spotRadius);
+        path->forget ();
+    }
 }
 
-void TunerView::drawInTuneGlow (VSTGUI::CDrawContext* ctx, const VSTGUI::CRect& r)
+void TunerView::drawArcTrack (VSTGUI::CDrawContext* ctx, const VSTGUI::CRect& r)
 {
-    if (glowIntensity_ < 0.01f)
+    if (confidence_ < 0.1f || targetFrequency_ <= 0.0f)
         return;
 
     float cx = static_cast<float> (r.left + r.getWidth () / 2);
     float cy = static_cast<float> (r.top + r.getHeight () * kPivotY);
+    float radius = static_cast<float> (std::min (r.getWidth (), r.getHeight ()) * kGaugeRadius);
 
-    // Draw 4 concentric semi-transparent green ellipses
-    for (int i = 3; i >= 0; --i)
+    float arcR = radius * 0.72f;
+    float bandWidth = radius * 0.06f;
+    int numSegments = 31;
+
+    for (int i = 0; i < numSegments; ++i)
     {
-        float spread = 20.0f + static_cast<float> (i) * 18.0f;
-        auto alpha = static_cast<uint8_t> (glowIntensity_ * (20.0f - static_cast<float> (i) * 4.0f));
-        VSTGUI::CColor glowColor (0x00, 0xff, 0x88, alpha);
-        ctx->setFillColor (glowColor);
-        VSTGUI::CRect ellipse (cx - spread, cy - spread * 0.6, cx + spread, cy + spread * 0.6);
-        ctx->drawEllipse (ellipse, VSTGUI::kDrawFilled);
+        float segCents = -50.0f + (100.0f * static_cast<float> (i) / static_cast<float> (numSegments - 1));
+        float angle = static_cast<float> (-M_PI / 2.0) + (segCents / 50.0f) * kSweepHalfAngle;
+
+        float nextCents = -50.0f + (100.0f * static_cast<float> (i + 1) / static_cast<float> (numSegments - 1));
+        if (i == numSegments - 1)
+            nextCents = segCents + (100.0f / static_cast<float> (numSegments - 1));
+        float nextAngle = static_cast<float> (-M_PI / 2.0) + (nextCents / 50.0f) * kSweepHalfAngle;
+
+        float innerR = arcR - bandWidth * 0.5f;
+        float outerR = arcR + bandWidth * 0.5f;
+
+        // Dim uniform color for guide rail
+        VSTGUI::CColor color (0x2a, 0x2a, 0x3e, 0x40);
+
+        auto* seg = ctx->createGraphicsPath ();
+        if (seg)
+        {
+            float x0 = cx + innerR * std::cos (angle);
+            float y0 = cy + innerR * std::sin (angle);
+            float x1 = cx + outerR * std::cos (angle);
+            float y1 = cy + outerR * std::sin (angle);
+            float x2 = cx + outerR * std::cos (nextAngle);
+            float y2 = cy + outerR * std::sin (nextAngle);
+            float x3 = cx + innerR * std::cos (nextAngle);
+            float y3 = cy + innerR * std::sin (nextAngle);
+
+            seg->beginSubpath (VSTGUI::CPoint (x0, y0));
+            seg->addLine (VSTGUI::CPoint (x1, y1));
+            seg->addLine (VSTGUI::CPoint (x2, y2));
+            seg->addLine (VSTGUI::CPoint (x3, y3));
+            seg->closeSubpath ();
+
+            ctx->setFillColor (color);
+            ctx->drawGraphicsPath (seg, VSTGUI::CDrawContext::kPathFilled);
+            seg->forget ();
+        }
+    }
+}
+
+void TunerView::drawArcHighlight (VSTGUI::CDrawContext* ctx, const VSTGUI::CRect& r)
+{
+    if (confidence_ < 0.1f || targetFrequency_ <= 0.0f)
+        return;
+
+    float cx = static_cast<float> (r.left + r.getWidth () / 2);
+    float cy = static_cast<float> (r.top + r.getHeight () * kPivotY);
+    float radius = static_cast<float> (std::min (r.getWidth (), r.getHeight ()) * kGaugeRadius);
+
+    float arcR = radius * 0.72f;
+    float bandWidth = radius * 0.06f;
+    int numSegments = 31;
+
+    // Determine accent color based on tuning accuracy
+    float absCents = std::abs (smoothedCents_);
+    VSTGUI::CColor accentColor;
+    if (absCents < 5.0f)
+        accentColor = VSTGUI::CColor (0x00, 0xe8, 0x7b, 0xff);
+    else if (absCents < 15.0f)
+        accentColor = VSTGUI::CColor (0xff, 0xb8, 0x30, 0xff);
+    else
+        accentColor = VSTGUI::CColor (0xff, 0x44, 0x66, 0xff);
+
+    for (int i = 0; i < numSegments; ++i)
+    {
+        float segCents = -50.0f + (100.0f * static_cast<float> (i) / static_cast<float> (numSegments - 1));
+
+        // Only draw segments within highlight range of needle
+        float dist = std::abs (segCents - smoothedCents_);
+        if (dist > kArcHighlightHalfWidth)
+            continue;
+
+        float alphaFactor = (1.0f - dist / kArcHighlightHalfWidth) * 0.9f;
+        auto alpha = static_cast<uint8_t> (alphaFactor * 255.0f);
+
+        float angle = static_cast<float> (-M_PI / 2.0) + (segCents / 50.0f) * kSweepHalfAngle;
+        float nextCents = -50.0f + (100.0f * static_cast<float> (i + 1) / static_cast<float> (numSegments - 1));
+        if (i == numSegments - 1)
+            nextCents = segCents + (100.0f / static_cast<float> (numSegments - 1));
+        float nextAngle = static_cast<float> (-M_PI / 2.0) + (nextCents / 50.0f) * kSweepHalfAngle;
+
+        float innerR = arcR - bandWidth * 0.5f;
+        float outerR = arcR + bandWidth * 0.5f;
+
+        auto* seg = ctx->createGraphicsPath ();
+        if (seg)
+        {
+            float x0 = cx + innerR * std::cos (angle);
+            float y0 = cy + innerR * std::sin (angle);
+            float x1 = cx + outerR * std::cos (angle);
+            float y1 = cy + outerR * std::sin (angle);
+            float x2 = cx + outerR * std::cos (nextAngle);
+            float y2 = cy + outerR * std::sin (nextAngle);
+            float x3 = cx + innerR * std::cos (nextAngle);
+            float y3 = cy + innerR * std::sin (nextAngle);
+
+            seg->beginSubpath (VSTGUI::CPoint (x0, y0));
+            seg->addLine (VSTGUI::CPoint (x1, y1));
+            seg->addLine (VSTGUI::CPoint (x2, y2));
+            seg->addLine (VSTGUI::CPoint (x3, y3));
+            seg->closeSubpath ();
+
+            VSTGUI::CColor segColor (accentColor.red, accentColor.green, accentColor.blue, alpha);
+            ctx->setFillColor (segColor);
+            ctx->drawGraphicsPath (seg, VSTGUI::CDrawContext::kPathFilled);
+            seg->forget ();
+        }
     }
 }
 
@@ -145,19 +280,26 @@ void TunerView::drawCentMarkers (VSTGUI::CDrawContext* ctx, const VSTGUI::CRect&
 
         if (cents == 0)
         {
-            ctx->setFrameColor (VSTGUI::CColor (0x00, 0xff, 0x88, 0xff));
+            // Center tick modulates brightness with bloom
+            auto green = static_cast<uint8_t> (0x88 + bloomIntensity_ * (0xff - 0x88));
+            ctx->setFrameColor (VSTGUI::CColor (0x00, green, 0x88, 0xff));
+        }
+        else if (cents % 25 == 0)
+        {
+            // Major ticks
+            ctx->setFrameColor (VSTGUI::CColor (0x88, 0x88, 0xaa, 0xff));
         }
         else
         {
-            ctx->setFrameColor (VSTGUI::CColor (0x88, 0x88, 0xaa, 0xff));
+            // Minor ticks dimmed
+            ctx->setFrameColor (VSTGUI::CColor (0x55, 0x55, 0x70, 0xff));
         }
         ctx->setLineWidth (lineWidth);
-
         ctx->drawLine (VSTGUI::CPoint (x1, y1), VSTGUI::CPoint (x2, y2));
     }
 
     // Draw cent labels at -50, -25, 0, +25, +50
-    auto labelFont = VSTGUI::makeOwned<VSTGUI::CFontDesc> ("Arial", 10);
+    auto labelFont = VSTGUI::makeOwned<VSTGUI::CFontDesc> ("Segoe UI", 10);
     ctx->setFont (labelFont);
     ctx->setFontColor (VSTGUI::CColor (0x88, 0x88, 0xaa, 0xff));
 
@@ -180,96 +322,76 @@ void TunerView::drawCentMarkers (VSTGUI::CDrawContext* ctx, const VSTGUI::CRect&
     }
 }
 
-void TunerView::drawTuningArc (VSTGUI::CDrawContext* ctx, const VSTGUI::CRect& r)
+void TunerView::drawNeedleTrail (VSTGUI::CDrawContext* ctx, const VSTGUI::CRect& r)
 {
-    float cx = static_cast<float> (r.left + r.getWidth () / 2);
-    float cy = static_cast<float> (r.top + r.getHeight () * kPivotY);
-    float radius = static_cast<float> (std::min (r.getWidth (), r.getHeight ()) * kGaugeRadius);
-
-    if (confidence_ < 0.1f || targetFrequency_ <= 0.0f)
+    if (confidence_ < 0.05f || targetFrequency_ <= 0.0f || trailCount_ < 2)
         return;
 
-    float arcR = radius * 0.72f;
-    float bandWidth = radius * 0.06f;
-    int numSegments = 61;
+    float cx = static_cast<float> (r.left + r.getWidth () / 2);
+    float cy = static_cast<float> (r.top + r.getHeight () * kPivotY);
+    float needleLen = static_cast<float> (std::min (r.getWidth (), r.getHeight ()) * kNeedleLength);
 
-    auto* path = ctx->createGraphicsPath ();
-    if (path)
+    VSTGUI::CColor trailColor (0x55, 0x55, 0x88, 0xff);
+
+    for (int i = 0; i < trailCount_; ++i)
     {
-        for (int i = 0; i < numSegments; ++i)
-        {
-            float segCents = -50.0f + (100.0f * static_cast<float> (i) / static_cast<float> (numSegments - 1));
-            float angle = static_cast<float> (-M_PI / 2.0) + (segCents / 50.0f) * kSweepHalfAngle;
+        // Read oldest to newest
+        int idx = (trailIndex_ - trailCount_ + i + kTrailLength) % kTrailLength;
+        float cents = trailCents_[idx];
+        if (cents < -50.0f) cents = -50.0f;
+        if (cents > 50.0f) cents = 50.0f;
 
-            float nextCents = -50.0f + (100.0f * static_cast<float> (i + 1) / static_cast<float> (numSegments - 1));
-            if (i == numSegments - 1)
-                nextCents = segCents + (100.0f / static_cast<float> (numSegments - 1));
-            float nextAngle = static_cast<float> (-M_PI / 2.0) + (nextCents / 50.0f) * kSweepHalfAngle;
+        float angle = static_cast<float> (-M_PI / 2.0) + (cents / 50.0f) * kSweepHalfAngle;
+        float nx = cx + needleLen * std::cos (angle);
+        float ny = cy + needleLen * std::sin (angle);
 
-            float innerR = arcR - bandWidth * 0.5f;
-            float outerR = arcR + bandWidth * 0.5f;
+        // Alpha fades with age: oldest ~0.03, newest ~0.25
+        float ageFrac = static_cast<float> (i) / static_cast<float> (trailCount_ - 1);
+        float alphaVal = 0.03f + ageFrac * 0.22f;
 
-            VSTGUI::CColor color;
-            float absCents = std::abs (segCents);
-            if (absCents < 5.0f)
-                color = VSTGUI::CColor (0x00, 0xcc, 0x66, 0xb0);
-            else if (absCents < 15.0f)
-                color = VSTGUI::CColor (0xff, 0xcc, 0x00, 0x80);
-            else
-                color = VSTGUI::CColor (0xff, 0x44, 0x44, 0x60);
-
-            // Draw each segment as a small filled trapezoid
-            auto* seg = ctx->createGraphicsPath ();
-            if (seg)
-            {
-                float x0 = cx + innerR * std::cos (angle);
-                float y0 = cy + innerR * std::sin (angle);
-                float x1 = cx + outerR * std::cos (angle);
-                float y1 = cy + outerR * std::sin (angle);
-                float x2 = cx + outerR * std::cos (nextAngle);
-                float y2 = cy + outerR * std::sin (nextAngle);
-                float x3 = cx + innerR * std::cos (nextAngle);
-                float y3 = cy + innerR * std::sin (nextAngle);
-
-                seg->beginSubpath (VSTGUI::CPoint (x0, y0));
-                seg->addLine (VSTGUI::CPoint (x1, y1));
-                seg->addLine (VSTGUI::CPoint (x2, y2));
-                seg->addLine (VSTGUI::CPoint (x3, y3));
-                seg->closeSubpath ();
-
-                ctx->setFillColor (color);
-                ctx->drawGraphicsPath (seg, VSTGUI::CDrawContext::kPathFilled);
-                seg->forget ();
-            }
-        }
-        path->forget ();
+        ctx->saveGlobalState ();
+        ctx->setGlobalAlpha (alphaVal);
+        ctx->setFrameColor (trailColor);
+        ctx->setLineWidth (1.5);
+        VSTGUI::CLineStyle roundStyle (VSTGUI::CLineStyle::kLineCapRound);
+        ctx->setLineStyle (roundStyle);
+        ctx->drawLine (VSTGUI::CPoint (cx, cy), VSTGUI::CPoint (nx, ny));
+        ctx->restoreGlobalState ();
     }
+}
+
+void TunerView::drawNeedleGlow (VSTGUI::CDrawContext* ctx, const VSTGUI::CRect& r)
+{
+    if (confidence_ < 0.05f || targetFrequency_ <= 0.0f)
+        return;
+
+    float cx = static_cast<float> (r.left + r.getWidth () / 2);
+    float cy = static_cast<float> (r.top + r.getHeight () * kPivotY);
+    float needleLen = static_cast<float> (std::min (r.getWidth (), r.getHeight ()) * kNeedleLength);
+
+    float clampedCents = smoothedCents_;
+    if (clampedCents < -50.0f) clampedCents = -50.0f;
+    if (clampedCents > 50.0f) clampedCents = 50.0f;
+
+    float angle = static_cast<float> (-M_PI / 2.0) + (clampedCents / 50.0f) * kSweepHalfAngle;
+    float nx = cx + needleLen * std::cos (angle);
+    float ny = cy + needleLen * std::sin (angle);
+
+    // Accent color based on tuning accuracy
+    float absCents = std::abs (smoothedCents_);
+    VSTGUI::CColor glowColor;
+    if (absCents < 5.0f)
+        glowColor = VSTGUI::CColor (0x00, 0xe8, 0x7b, 0x26); // green at alpha 0.15
+    else if (absCents < 15.0f)
+        glowColor = VSTGUI::CColor (0xff, 0xb8, 0x30, 0x26); // amber at alpha 0.15
     else
-    {
-        // Fallback: dot approach
-        int numDots = 21;
-        for (int i = 0; i < numDots; i++)
-        {
-            float dotCents = -50.0f + (100.0f * static_cast<float> (i) / static_cast<float> (numDots - 1));
-            float angle = static_cast<float> (-M_PI / 2.0) + (dotCents / 50.0f) * kSweepHalfAngle;
+        glowColor = VSTGUI::CColor (0xff, 0x44, 0x66, 0x26); // red at alpha 0.15
 
-            float x = cx + arcR * std::cos (angle);
-            float y = cy + arcR * std::sin (angle);
-
-            VSTGUI::CColor color;
-            float absCents = std::abs (dotCents);
-            if (absCents < 5.0f)
-                color = VSTGUI::CColor (0x00, 0xcc, 0x66, 0x80);
-            else if (absCents < 15.0f)
-                color = VSTGUI::CColor (0xff, 0xcc, 0x00, 0x60);
-            else
-                color = VSTGUI::CColor (0xff, 0x44, 0x44, 0x40);
-
-            ctx->setFillColor (color);
-            VSTGUI::CRect dot (x - 3, y - 3, x + 3, y + 3);
-            ctx->drawEllipse (dot, VSTGUI::kDrawFilled);
-        }
-    }
+    ctx->setFrameColor (glowColor);
+    ctx->setLineWidth (8.0);
+    VSTGUI::CLineStyle roundStyle (VSTGUI::CLineStyle::kLineCapRound);
+    ctx->setLineStyle (roundStyle);
+    ctx->drawLine (VSTGUI::CPoint (cx, cy), VSTGUI::CPoint (nx, ny));
 }
 
 void TunerView::drawNeedle (VSTGUI::CDrawContext* ctx, const VSTGUI::CRect& r)
@@ -286,92 +408,150 @@ void TunerView::drawNeedle (VSTGUI::CDrawContext* ctx, const VSTGUI::CRect& r)
     if (clampedCents > 50.0f) clampedCents = 50.0f;
 
     float angle = static_cast<float> (-M_PI / 2.0) + (clampedCents / 50.0f) * kSweepHalfAngle;
-
-    // Needle tip
     float nx = cx + needleLen * std::cos (angle);
     float ny = cy + needleLen * std::sin (angle);
 
-    // Color based on tuning accuracy
-    VSTGUI::CColor needleColor;
-    float absCents = std::abs (smoothedCents_);
-    if (absCents < 5.0f)
-        needleColor = VSTGUI::CColor (0x00, 0xff, 0x88, 0xff);
-    else if (absCents < 15.0f)
-        needleColor = VSTGUI::CColor (0xff, 0xdd, 0x00, 0xff);
-    else
-        needleColor = VSTGUI::CColor (0xff, 0x44, 0x44, 0xff);
+    VSTGUI::CLineStyle roundStyle (VSTGUI::CLineStyle::kLineCapRound);
 
-    // Tapered triangle needle via CGraphicsPath
-    float perpAngle = angle + static_cast<float> (M_PI / 2.0);
-    float baseHalf = 4.0f;
-    float tipHalf = 1.0f;
+    // Main needle: 3px white line with round caps
+    ctx->setFrameColor (VSTGUI::CColor (0xe0, 0xe0, 0xff, 0xff));
+    ctx->setLineWidth (3.0);
+    ctx->setLineStyle (roundStyle);
+    ctx->drawLine (VSTGUI::CPoint (cx, cy), VSTGUI::CPoint (nx, ny));
+
+    // Center highlight: 1.5px brighter overlay
+    ctx->setFrameColor (VSTGUI::CColor (0xf0, 0xf0, 0xff, 0xff));
+    ctx->setLineWidth (1.5);
+    ctx->setLineStyle (roundStyle);
+    ctx->drawLine (VSTGUI::CPoint (cx, cy), VSTGUI::CPoint (nx, ny));
+
+    // Pivot dot: small radial gradient dot
+    auto* pivotPath = ctx->createGraphicsPath ();
+    if (pivotPath)
+    {
+        float pivotR = 5.0f;
+        VSTGUI::CRect pivotRect (cx - pivotR, cy - pivotR, cx + pivotR, cy + pivotR);
+        pivotPath->addRect (pivotRect);
+        auto pivotGrad = VSTGUI::owned (VSTGUI::CGradient::create (0.0, 1.0,
+            VSTGUI::CColor (0xe0, 0xe0, 0xf0, 0xff),
+            VSTGUI::CColor (0x60, 0x60, 0x80, 0xff)));
+        ctx->fillRadialGradient (pivotPath, *pivotGrad,
+            VSTGUI::CPoint (cx, cy), pivotR);
+        pivotPath->forget ();
+
+        // Stroke ring
+        ctx->setFrameColor (VSTGUI::CColor (0x40, 0x40, 0x60, 0xff));
+        ctx->setLineWidth (1.0);
+        ctx->drawEllipse (pivotRect, VSTGUI::kDrawStroked);
+    }
+    else
+    {
+        // Fallback pivot
+        VSTGUI::CRect pivot (cx - 5, cy - 5, cx + 5, cy + 5);
+        ctx->setFillColor (VSTGUI::CColor (0xe0, 0xe0, 0xf0, 0xff));
+        ctx->drawEllipse (pivot, VSTGUI::kDrawFilled);
+        ctx->setFrameColor (VSTGUI::CColor (0x40, 0x40, 0x60, 0xff));
+        ctx->setLineWidth (1.0);
+        ctx->drawEllipse (pivot, VSTGUI::kDrawStroked);
+    }
+}
+
+void TunerView::drawNoteBloom (VSTGUI::CDrawContext* ctx, const VSTGUI::CRect& r)
+{
+    if (bloomIntensity_ < 0.01f)
+        return;
+
+    float cx = static_cast<float> (r.left + r.getWidth () / 2);
+    float noteY = static_cast<float> (r.top + r.getHeight () * kPivotY + 20);
+    float bloomRadius = static_cast<float> (r.getHeight () * 0.12);
 
     auto* path = ctx->createGraphicsPath ();
     if (path)
     {
-        float bx1 = cx + baseHalf * std::cos (perpAngle);
-        float by1 = cy + baseHalf * std::sin (perpAngle);
-        float bx2 = cx - baseHalf * std::cos (perpAngle);
-        float by2 = cy - baseHalf * std::sin (perpAngle);
-        float tx1 = nx + tipHalf * std::cos (perpAngle);
-        float ty1 = ny + tipHalf * std::sin (perpAngle);
-        float tx2 = nx - tipHalf * std::cos (perpAngle);
-        float ty2 = ny - tipHalf * std::sin (perpAngle);
+        VSTGUI::CRect bloomRect (cx - bloomRadius, noteY - bloomRadius * 0.6,
+                                  cx + bloomRadius, noteY + bloomRadius * 0.6);
+        path->addRect (bloomRect);
 
-        path->beginSubpath (VSTGUI::CPoint (bx1, by1));
-        path->addLine (VSTGUI::CPoint (tx1, ty1));
-        path->addLine (VSTGUI::CPoint (tx2, ty2));
-        path->addLine (VSTGUI::CPoint (bx2, by2));
-        path->closeSubpath ();
-
-        ctx->setFillColor (needleColor);
-        ctx->drawGraphicsPath (path, VSTGUI::CDrawContext::kPathFilled);
+        auto innerAlpha = static_cast<uint8_t> (bloomIntensity_ * 0x18);
+        auto gradient = VSTGUI::owned (VSTGUI::CGradient::create (0.0, 1.0,
+            VSTGUI::CColor (0x00, 0xe8, 0x7b, innerAlpha),
+            VSTGUI::CColor (0x00, 0xe8, 0x7b, 0x00)));
+        ctx->fillRadialGradient (path, *gradient,
+            VSTGUI::CPoint (cx, noteY), bloomRadius);
         path->forget ();
     }
     else
     {
-        // Fallback: thick line
-        ctx->setFrameColor (needleColor);
-        ctx->setLineWidth (3.0);
-        ctx->drawLine (VSTGUI::CPoint (cx, cy), VSTGUI::CPoint (nx, ny));
+        // Fallback: 3 concentric green ellipses
+        for (int i = 2; i >= 0; --i)
+        {
+            float spread = 15.0f + static_cast<float> (i) * 15.0f;
+            auto alpha = static_cast<uint8_t> (bloomIntensity_ * (18.0f - static_cast<float> (i) * 5.0f));
+            VSTGUI::CColor glowColor (0x00, 0xe8, 0x7b, alpha);
+            ctx->setFillColor (glowColor);
+            VSTGUI::CRect ellipse (cx - spread, noteY - spread * 0.5, cx + spread, noteY + spread * 0.5);
+            ctx->drawEllipse (ellipse, VSTGUI::kDrawFilled);
+        }
     }
-
-    // Pivot dot with border ring
-    ctx->setFillColor (VSTGUI::CColor (0xcc, 0xcc, 0xcc, 0xff));
-    VSTGUI::CRect pivot (cx - 8, cy - 8, cx + 8, cy + 8);
-    ctx->drawEllipse (pivot, VSTGUI::kDrawFilled);
-    ctx->setFrameColor (VSTGUI::CColor (0x88, 0x88, 0xaa, 0xff));
-    ctx->setLineWidth (1.5);
-    ctx->drawEllipse (pivot, VSTGUI::kDrawStroked);
 }
 
 void TunerView::drawNoteDisplay (VSTGUI::CDrawContext* ctx, const VSTGUI::CRect& r)
 {
     float cx = static_cast<float> (r.left + r.getWidth () / 2);
-    float noteY = static_cast<float> (r.top + r.getHeight () * kPivotY + 16);
+    float noteY = static_cast<float> (r.top + r.getHeight () * kPivotY + 20);
 
-    VSTGUI::CColor textColor (0xff, 0xff, 0xff, 0xff);
-    if (confidence_ < 0.1f || targetFrequency_ <= 0.0f)
-        textColor = VSTGUI::CColor (0x66, 0x66, 0x88, 0xff);
+    bool active = confidence_ >= 0.1f && targetFrequency_ > 0.0f;
 
-    auto noteFont = VSTGUI::makeOwned<VSTGUI::CFontDesc> ("Arial", 42, VSTGUI::kBoldFace);
+    // Text glow halo when bloom is active
+    if (active && bloomIntensity_ > 0.3f)
+    {
+        auto haloFont = VSTGUI::makeOwned<VSTGUI::CFontDesc> ("Segoe UI", 54, VSTGUI::kBoldFace);
+        ctx->setFont (haloFont);
+        auto haloAlpha = static_cast<uint8_t> (bloomIntensity_ * 0.15f * 255.0f);
+        ctx->setFontColor (VSTGUI::CColor (0x00, 0xe8, 0x7b, haloAlpha));
+        VSTGUI::CRect haloRect (cx - 80, noteY, cx + 80, noteY + 56);
+        ctx->drawString (VSTGUI::UTF8String (noteName_), haloRect, VSTGUI::kCenterText);
+    }
+
+    // Main note text
+    auto noteFont = VSTGUI::makeOwned<VSTGUI::CFontDesc> ("Segoe UI", 52, VSTGUI::kBoldFace);
     ctx->setFont (noteFont);
-    ctx->setFontColor (textColor);
 
-    VSTGUI::CRect noteRect (cx - 80, noteY, cx + 80, noteY + 48);
-    VSTGUI::UTF8String noteStr (noteName_);
-    ctx->drawString (noteStr, noteRect, VSTGUI::kCenterText);
+    VSTGUI::CColor textColor;
+    if (!active)
+    {
+        textColor = VSTGUI::CColor (0x66, 0x66, 0x88, 0xff);
+    }
+    else if (bloomIntensity_ > 0.5f)
+    {
+        // Interpolate from white to green
+        float t = (bloomIntensity_ - 0.5f) * 2.0f; // 0..1
+        t = std::min (t, 1.0f);
+        auto red   = static_cast<uint8_t> (0xf0 * (1.0f - t));
+        auto green = static_cast<uint8_t> (0xf0 + (0xe8 - 0xf0) * t);
+        auto blue  = static_cast<uint8_t> (0xff * (1.0f - t) + 0x7b * t);
+        textColor = VSTGUI::CColor (red, green, blue, 0xff);
+    }
+    else
+    {
+        textColor = VSTGUI::CColor (0xf0, 0xf0, 0xff, 0xff);
+    }
+
+    ctx->setFontColor (textColor);
+    VSTGUI::CRect noteRect (cx - 80, noteY, cx + 80, noteY + 56);
+    ctx->drawString (VSTGUI::UTF8String (noteName_), noteRect, VSTGUI::kCenterText);
 }
 
 void TunerView::drawInfoText (VSTGUI::CDrawContext* ctx, const VSTGUI::CRect& r)
 {
-    auto smallFont = VSTGUI::makeOwned<VSTGUI::CFontDesc> ("Arial", 12);
-    ctx->setFont (smallFont);
+    auto monoFont = VSTGUI::makeOwned<VSTGUI::CFontDesc> ("Consolas", 13);
+    ctx->setFont (monoFont);
 
     float cx = static_cast<float> (r.left + r.getWidth () / 2);
-    float infoY = static_cast<float> (r.top + r.getHeight () * kPivotY + 68);
+    float pivotAbsY = static_cast<float> (r.top + r.getHeight () * kPivotY);
 
-    // Frequency display
+    // Frequency display at pivot + 74px
+    float hzY = pivotAbsY + 74.0f;
     char freqStr[32];
     if (targetFrequency_ > 0.0f)
         std::snprintf (freqStr, sizeof (freqStr), "%.1f Hz", targetFrequency_);
@@ -379,40 +559,26 @@ void TunerView::drawInfoText (VSTGUI::CDrawContext* ctx, const VSTGUI::CRect& r)
         std::snprintf (freqStr, sizeof (freqStr), "--- Hz");
 
     ctx->setFontColor (VSTGUI::CColor (0xaa, 0xaa, 0xcc, 0xff));
-    VSTGUI::CRect freqRect (cx - 80, infoY, cx + 80, infoY + 16);
+    VSTGUI::CRect freqRect (cx - 80, hzY, cx + 80, hzY + 16);
     ctx->drawString (VSTGUI::UTF8String (freqStr), freqRect, VSTGUI::kCenterText);
 
-    // Cents display
+    // Cents display at pivot + 90px, always show sign
+    float centsY = pivotAbsY + 90.0f;
     char centsStr[32];
     if (targetFrequency_ > 0.0f)
     {
         if (targetCents_ >= 0.0f)
-            std::snprintf (centsStr, sizeof (centsStr), "+%.1f cents", targetCents_);
+            std::snprintf (centsStr, sizeof (centsStr), "+%.1f ct", targetCents_);
         else
-            std::snprintf (centsStr, sizeof (centsStr), "%.1f cents", targetCents_);
+            std::snprintf (centsStr, sizeof (centsStr), "%.1f ct", targetCents_);
     }
     else
     {
-        std::snprintf (centsStr, sizeof (centsStr), "--- cents");
+        std::snprintf (centsStr, sizeof (centsStr), "--- ct");
     }
 
-    VSTGUI::CRect centsRect (cx - 80, infoY + 16, cx + 80, infoY + 32);
+    VSTGUI::CRect centsRect (cx - 80, centsY, cx + 80, centsY + 16);
     ctx->drawString (VSTGUI::UTF8String (centsStr), centsRect, VSTGUI::kCenterText);
-
-    // Reference display
-    char refStr[32];
-    std::snprintf (refStr, sizeof (refStr), "A4=%.0f Hz", reference_);
-
-    ctx->setFontColor (VSTGUI::CColor (0x88, 0x88, 0xaa, 0xff));
-    VSTGUI::CRect refRect (cx - 80, infoY + 34, cx + 80, infoY + 48);
-    ctx->drawString (VSTGUI::UTF8String (refStr), refRect, VSTGUI::kCenterText);
-
-    // Title
-    auto titleFont = VSTGUI::makeOwned<VSTGUI::CFontDesc> ("Arial", 14, VSTGUI::kBoldFace);
-    ctx->setFont (titleFont);
-    ctx->setFontColor (VSTGUI::CColor (0x88, 0x99, 0xcc, 0xff));
-    VSTGUI::CRect titleRect (r.left + 10, r.top + 8, r.right - 10, r.top + 26);
-    ctx->drawString (VSTGUI::UTF8String ("Guitar Tuner"), titleRect, VSTGUI::kCenterText);
 }
 
 // ============================================================================
