@@ -1,0 +1,119 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<vstgui-ui-description version="1">
+    <fonts>
+    </fonts>
+    <colors>
+        <color name="Background" rgba="#1a1a2eff"/>
+        <color name="TextLight" rgba="#ffffffcc"/>
+        <color name="TextDim" rgba="#8888aaff"/>
+        <color name="GreenAccent" rgba="#00ff88ff"/>
+        <color name="PanelBg" rgba="#16213eff"/>
+    </colors>
+    <template
+        class="CViewContainer"
+        name="view"
+        size="400, 400"
+        minSize="400, 400"
+        maxSize="400, 400"
+        background-color="Background"
+        background-color-draw-style="filled"
+        mouse-enabled="true"
+        opacity="1"
+        origin="0, 0"
+        transparent="false"
+    >
+        <!-- Custom tuner view: needle, note name, frequency, cents -->
+        <view
+            class="TunerView"
+            origin="0, 0"
+            size="400, 370"
+            mouse-enabled="true"
+            transparent="true"
+        />
+
+        <!-- Reference label -->
+        <view
+            class="CTextLabel"
+            origin="20, 370"
+            size="60, 24"
+            font="~ NormalFont"
+            font-color="TextDim"
+            back-color="~ TransparentCColor"
+            frame-color="~ TransparentCColor"
+            text-alignment="right"
+            text-inset="5, 0"
+            title="A4 ="
+            transparent="true"
+            mouse-enabled="false"
+        />
+
+        <!-- Reference frequency knob -->
+        <view
+            class="CKnob"
+            control-tag="Reference"
+            origin="85, 365"
+            size="32, 32"
+            angle-start="135"
+            angle-range="270"
+            default-value="0.615384615"
+            min-value="0"
+            max-value="1"
+            mouse-enabled="true"
+            corona-color="GreenAccent"
+            handle-line-width="1"
+            handle-color="TextLight"
+        />
+
+        <!-- Reference value display -->
+        <view
+            class="CTextEdit"
+            control-tag="Reference"
+            origin="125, 370"
+            size="55, 24"
+            font="~ NormalFontSmall"
+            font-color="TextLight"
+            back-color="PanelBg"
+            frame-color="TextDim"
+            frame-width="1"
+            round-rect-radius="3"
+            style-round-rect="true"
+            text-alignment="center"
+            default-value="0.615384615"
+            min-value="0"
+            max-value="1"
+            mouse-enabled="true"
+            value-precision="1"
+        />
+
+        <!-- Hz label for reference -->
+        <view
+            class="CTextLabel"
+            origin="185, 370"
+            size="30, 24"
+            font="~ NormalFontSmall"
+            font-color="TextDim"
+            back-color="~ TransparentCColor"
+            frame-color="~ TransparentCColor"
+            text-alignment="left"
+            title="Hz"
+            transparent="true"
+            mouse-enabled="false"
+        />
+
+    </template>
+    <variables/>
+    <custom>
+        <attributes color="GreenAccent" enabled="true" name="FocusDrawing" width="1"/>
+        <attributes Size="5, 5" name="UIGridController"/>
+        <attributes SelectedTemplate="view" name="UITemplateController"/>
+    </custom>
+    <bitmaps/>
+    <control-tags>
+        <control-tag name="Reference" tag="1"/>
+        <control-tag name="Frequency" tag="2"/>
+        <control-tag name="Cents" tag="3"/>
+        <control-tag name="Note" tag="4"/>
+        <control-tag name="Confidence" tag="5"/>
+    </control-tags>
+    <gradients/>
+</vstgui-ui-description>

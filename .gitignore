@@ -1,0 +1,12 @@
+build/
+out/
+.vs/
+*.user
+*.suo
+*.sdf
+*.opensdf
+*.db
+CMakeUserPresets.json
+*.vst3
+extern/
+.claude/
